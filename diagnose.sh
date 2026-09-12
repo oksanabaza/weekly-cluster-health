@@ -77,11 +77,29 @@ echo "* Hub: $(oc whoami --show-server 2>/dev/null || echo "unknown")"
 section "ClusterClaim"
 CLAIM_JSON=$(oc get -n "${CLUSTERPOOL_TARGET_NAMESPACE}" clusterclaim.hive "${CLUSTERCLAIM_NAME}" -o json 2>/dev/null)
 if [[ -z "${CLAIM_JSON}" ]]; then
-  echo "* No ClusterClaim named ${CLUSTERCLAIM_NAME} exists"
-  echo "  The deploy never got as far as creating a claim - check the job logs for"
-  echo "  StartRHACM errors before it reached the claim step."
-  VERDICT="No ClusterClaim was created - failure happened before claiming"
-  DOMAIN="A"
+  echo "* No ClusterClaim named ${CLUSTERCLAIM_NAME} exists in ${CLUSTERPOOL_TARGET_NAMESPACE}"
+
+  # Easy mistake: passing the pool name instead of the claim name. rhacmstackem
+  # names claims "rhacmstackem-<pool>" by default, but the CronJob may override it.
+  if oc get -n "${CLUSTERPOOL_TARGET_NAMESPACE}" clusterpool.hive "${CLUSTERCLAIM_NAME}" &>/dev/null; then
+    echo "  Note: ${CLUSTERCLAIM_NAME} is a ClusterPool, not a ClusterClaim."
+    CLUSTERPOOL_NAME="${CLUSTERCLAIM_NAME}"
+    echo "  Claims against this pool:"
+    oc get -n "${CLUSTERPOOL_TARGET_NAMESPACE}" clusterclaim.hive -o json 2>/dev/null \
+      | jq -r --arg p "${CLUSTERPOOL_NAME}" '.items[]? | select(.spec.clusterPoolName == $p)
+        | "    \(.metadata.name)  created=\(.metadata.creationTimestamp)  cluster=\(.spec.namespace // "(none)")"' \
+      | sed '/^$/d' || true
+    echo "  Re-run with CLUSTERCLAIM_NAME set to one of the above."
+    VERDICT="${CLUSTERCLAIM_NAME} is a pool name - re-run with an actual claim name"
+  else
+    echo "  Claims that do exist in this namespace:"
+    oc get -n "${CLUSTERPOOL_TARGET_NAMESPACE}" clusterclaim.hive \
+      -o custom-columns='NAME:.metadata.name,POOL:.spec.clusterPoolName,CREATED:.metadata.creationTimestamp' \
+      2>/dev/null | sed 's/^/    /'
+    echo "  If the name is right, the deploy failed before it created a claim -"
+    echo "  check the job logs for StartRHACM errors."
+    VERDICT="No ClusterClaim named ${CLUSTERCLAIM_NAME} - verify the name before concluding the deploy failed"
+  fi
 else
   CLAIM_CONDITIONS=$(echo "${CLAIM_JSON}" | jq -r '.status.conditions // []')
   CLUSTERDEPLOYMENT=$(echo "${CLAIM_JSON}" | jq -r '.spec.namespace // ""')
@@ -205,7 +223,11 @@ RESOLVED_KUBECONFIG=$(resolveClaimedKubeconfig)
 if [[ -z "${RESOLVED_KUBECONFIG}" || ! -f "${RESOLVED_KUBECONFIG}" ]]; then
   section "RHACM install on the claimed cluster"
   echo "* No kubeconfig for ${CLUSTERCLAIM_NAME} - skipping domain A' checks"
-  echo "  Set CLAIMED_KUBECONFIG, or install cluster-keeper so 'ck kubeconfig' can fetch one."
+  if command -v ck &>/dev/null; then
+    echo "  'ck kubeconfig -r ${CLUSTERCLAIM_NAME}' returned nothing - is that claim name right?"
+  else
+    echo "  Set CLAIMED_KUBECONFIG, or install cluster-keeper so 'ck kubeconfig' can fetch one."
+  fi
 else
   section "RHACM install on the claimed cluster"
   echo "* Using kubeconfig: ${RESOLVED_KUBECONFIG}"
