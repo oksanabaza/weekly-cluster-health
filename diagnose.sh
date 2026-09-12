@@ -144,6 +144,17 @@ if [[ -n "${CLUSTERPOOL_NAME}" && -z "${CLUSTERDEPLOYMENT:-}" ]]; then
     VERDICT="ClusterPool ${CLUSTERPOOL_NAME} does not exist"
   else
     echo "${POOL_JSON}" | jq -r '"* ready=\(.status.ready // 0) standby=\(.status.standby // 0) size=\(.status.size // 0)  (spec: size=\(.spec.size) runningCount=\(.spec.runningCount // 0) maxSize=\(.spec.maxSize // "unset"))"'
+
+    # rhacmstackem scales the pool down after a deploy (CLUSTERPOOL_POST_DEPLOY_SIZE),
+    # so spec.size=0 is normal *between* deploys - but fatal if a claim is waiting.
+    if [[ "$(echo "${POOL_JSON}" | jq -r '.spec.size')" == "0" ]]; then
+      echo "  [!] Pool is scaled to 0, so nothing can be claimed from it."
+      echo "      Expected between deploys; a problem if a claim is still Pending."
+      if [[ "${PENDING_REASON:-}" == "NoClusters" ]]; then
+        VERDICT="ClusterPool ${CLUSTERPOOL_NAME} is scaled to 0 and was never scaled back up"
+      fi
+    fi
+
     POOL_CONDITIONS=$(echo "${POOL_JSON}" | jq -r '.status.conditions // []')
     # MissingDependencies is negative polarity; the rest here are positive.
     reportCondition "${POOL_CONDITIONS}" "MissingDependencies" "True"
@@ -152,10 +163,12 @@ if [[ -n "${CLUSTERPOOL_NAME}" && -z "${CLUSTERDEPLOYMENT:-}" ]]; then
 
     # A pool that can't fill itself is usually failing to provision its own
     # clusters, which Hive then deprovisions and retries - so catch one in flight.
+    # Built from JSON rather than custom-columns: with pipefail, a non-zero exit
+    # from oc on an empty result made the fallback fire alongside a header row.
     echo "* Pool-owned ClusterDeployments:"
-    oc get clusterdeployment.hive -A -l "hive.openshift.io/clusterpool-name=${CLUSTERPOOL_NAME}" \
-      -o custom-columns='NAME:.metadata.name,INSTALLED:.spec.installed,PROVISION:.status.conditions[?(@.type=="Provisioned")].reason,RESTARTS:.status.installRestarts' \
-      2>/dev/null | sed 's/^/    /' || echo "    (none found)"
+    POOL_CDS=$(oc get clusterdeployment.hive -A -l "hive.openshift.io/clusterpool-name=${CLUSTERPOOL_NAME}" -o json 2>/dev/null \
+      | jq -r '.items[]? | "    \(.metadata.namespace)/\(.metadata.name)  installed=\(.spec.installed // false)  provisioned=\([.status.conditions[]? | select(.type == "Provisioned") | .reason] | first // "?")  restarts=\(.status.installRestarts // 0)"')
+    echo "${POOL_CDS:-"    (none)"}"
   fi
 fi
 
