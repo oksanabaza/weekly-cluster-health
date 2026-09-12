@@ -221,7 +221,8 @@ if [[ -n "${CLUSTERDEPLOYMENT:-}" ]]; then
       section "ClusterProvision ${PROVISION}"
       PROV_JSON=$(oc get -n "${CLUSTERDEPLOYMENT}" clusterprovision.hive "${PROVISION}" -o json 2>/dev/null)
       if [[ -n "${PROV_JSON}" ]]; then
-        echo "* stage: $(echo "${PROV_JSON}" | jq -r '.spec.stage // "?"')"
+        PROV_STAGE=$(echo "${PROV_JSON}" | jq -r '.spec.stage // "?"')
+        echo "* stage: ${PROV_STAGE}"
         PROV_REASON=$(echo "${PROV_JSON}" | jq -r '.status.conditions[]? | select(.type == "ClusterProvisionFailed" and .status == "True") | .reason // ""')
         echo "${PROV_JSON}" | jq -r '.status.conditions[]? | select(.type == "ClusterProvisionFailed" and .status == "True") | "  [!] \(.reason // "?") - \(.message // "" | .[0:600])"'
         echo "${PROV_JSON}" | jq -r '.status.conditions[]? | select(.type == "InstallPodStuck" and .status == "True") | "  [!] InstallPodStuck=\(.reason // "?") - \(.message // "")"'
@@ -233,18 +234,22 @@ if [[ -n "${CLUSTERDEPLOYMENT:-}" ]]; then
           DOMAIN="A"
         fi
 
-        # installLog is the full openshift-install console log, password-scrubbed
-        # by Hive. Absent if the install pod never got far enough to write it.
-        echo "* Last ${INSTALL_LOG_LINES} lines of the installer log:"
-        INSTALL_LOG=$(echo "${PROV_JSON}" | jq -r '.spec.installLog // ""')
-        if [[ -n "${INSTALL_LOG}" ]]; then
-          echo "${INSTALL_LOG}" | tail -n "${INSTALL_LOG_LINES}" | sed 's/^/    /'
-        else
-          echo "    (no installLog on the ClusterProvision - falling back to the pod)"
-          # Container is "installer"; "hive" is only an init container that copies binaries.
-          oc logs -n "${CLUSTERDEPLOYMENT}" -l "hive.openshift.io/cluster-provision-name=${PROVISION}" \
-            -c installer --tail="${INSTALL_LOG_LINES}" 2>/dev/null | sed 's/^/    /' \
-            || echo "    (provision pod is gone too)"
+        # Only read the installer log when the provision actually failed - on a
+        # successful install it is pages of noise that buries the real findings.
+        if [[ "${PROV_STAGE}" == "failed" || -n "${PROV_REASON}" ]]; then
+          # installLog is the full openshift-install console log, password-scrubbed
+          # by Hive. Absent if the install pod never got far enough to write it.
+          echo "* Last ${INSTALL_LOG_LINES} lines of the installer log:"
+          INSTALL_LOG=$(echo "${PROV_JSON}" | jq -r '.spec.installLog // ""')
+          if [[ -n "${INSTALL_LOG}" ]]; then
+            echo "${INSTALL_LOG}" | tail -n "${INSTALL_LOG_LINES}" | sed 's/^/    /'
+          else
+            echo "    (no installLog on the ClusterProvision - falling back to the pod)"
+            # Container is "installer"; "hive" is only an init container that copies binaries.
+            oc logs -n "${CLUSTERDEPLOYMENT}" -l "hive.openshift.io/cluster-provision-name=${PROVISION}" \
+              -c installer --tail="${INSTALL_LOG_LINES}" 2>/dev/null | sed 's/^/    /' \
+              || echo "    (provision pod is gone too)"
+          fi
         fi
       fi
     fi
@@ -270,14 +275,26 @@ else
   if ! oc get nodes &>/dev/null; then
     echo "* Cluster is not reachable with this kubeconfig - skipping"
   else
-    DOMAIN="A'"
+    # Read MCH first: it decides whether anything else here is worth alarming about.
+    MCH_PHASE=$(oc get multiclusterhub -A -o jsonpath='{.items[0].status.phase}' 2>/dev/null)
 
     # Image problems show up here first: a CatalogSource that can't be pulled.
     CATALOG_STATE=$(oc get catalogsource acm-custom-registry -n openshift-marketplace -o jsonpath='{.status.connectionState.lastObservedState}' 2>/dev/null)
-    echo "* CatalogSource acm-custom-registry: ${CATALOG_STATE:-"(not found)"}"
-    if [[ -n "${CATALOG_STATE}" && "${CATALOG_STATE}" != "READY" ]]; then
-      echo "  Image: $(oc get catalogsource acm-custom-registry -n openshift-marketplace -o jsonpath='{.spec.image}' 2>/dev/null)"
-      VERDICT="ACM CatalogSource is ${CATALOG_STATE} - the ACM catalog image could not be served"
+    if [[ -z "${CATALOG_STATE}" ]]; then
+      # Not an error on its own - the catalog source is only needed to install.
+      echo "* CatalogSource acm-custom-registry: (not present)"
+      if [[ "${MCH_PHASE}" != "Running" ]]; then
+        echo "  [!] ACM is not Running and there is no catalog source to install it from."
+        VERDICT="No ACM CatalogSource and ACM is not running - the catalog was never created"
+        DOMAIN="A'"
+      fi
+    else
+      echo "* CatalogSource acm-custom-registry: ${CATALOG_STATE}"
+      if [[ "${CATALOG_STATE}" != "READY" ]]; then
+        echo "  Image: $(oc get catalogsource acm-custom-registry -n openshift-marketplace -o jsonpath='{.spec.image}' 2>/dev/null)"
+        VERDICT="ACM CatalogSource is ${CATALOG_STATE} - the ACM catalog image could not be served"
+        DOMAIN="A'"
+      fi
     fi
 
     echo "* Pods stuck pulling images:"
@@ -291,22 +308,52 @@ else
     if [[ -n "${PULL_ERRORS}" ]]; then
       echo "${PULL_ERRORS}"
       VERDICT="Image pull failures on the cluster - bad tag or expired pull secret"
+      DOMAIN="A'"
     else
       echo "    (none)"
     fi
 
     echo "* Failed CSVs / Subscriptions:"
-    oc get csv -A -o json 2>/dev/null | jq -r '.items[] | select(.status.phase == "Failed") | "    \(.metadata.namespace)/\(.metadata.name): \(.status.reason // "?") - \(.status.message // "" | .[0:200])"' | head -10
-    oc get subscription -A -o json 2>/dev/null | jq -r '.items[] | select((.status.conditions // [])[]? | select(.type == "ResolutionFailed" and .status == "True")) | "    \(.metadata.namespace)/\(.metadata.name): ResolutionFailed"' | head -10
+    OLM_FAILURES=$(
+      oc get csv -A -o json 2>/dev/null | jq -r '.items[]? | select(.status.phase == "Failed") | "    \(.metadata.namespace)/\(.metadata.name): \(.status.reason // "?") - \(.status.message // "" | .[0:200])"'
+      oc get subscription -A -o json 2>/dev/null | jq -r '.items[]? | select((.status.conditions // [])[]? | select(.type == "ResolutionFailed" and .status == "True")) | "    \(.metadata.namespace)/\(.metadata.name): ResolutionFailed"'
+    )
+    if [[ -n "${OLM_FAILURES}" ]]; then
+      echo "${OLM_FAILURES}" | head -20
+      if [[ "${MCH_PHASE}" != "Running" ]]; then
+        VERDICT="OLM could not install ACM - see the failed CSVs/Subscriptions above"
+        DOMAIN="A'"
+      fi
+    else
+      echo "    (none)"
+    fi
 
     echo "* MultiClusterHub:"
-    oc get multiclusterhub -A -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name,STATUS:.status.phase,VERSION:.status.currentVersion' 2>/dev/null | sed 's/^/    /' \
-      || echo "    (no MultiClusterHub found - ACM never got installed)"
+    MCH_INFO=$(oc get multiclusterhub -A -o json 2>/dev/null \
+      | jq -r '.items[]? | "    \(.metadata.namespace)/\(.metadata.name)  phase=\(.status.phase // "?")  version=\(.status.currentVersion // "?")"')
+    if [[ -n "${MCH_INFO}" ]]; then
+      echo "${MCH_INFO}"
+      if [[ "${MCH_PHASE}" != "Running" ]]; then
+        VERDICT="MultiClusterHub is ${MCH_PHASE:-unknown}, not Running"
+        DOMAIN="A'"
+      fi
+    else
+      echo "    (none - ACM never got installed)"
+      VERDICT="No MultiClusterHub on the cluster - RHACM was never installed"
+      DOMAIN="A'"
+    fi
   fi
   unset KUBECONFIG
 fi
 
 ##############################################################################
+# A healthy deploy should say so plainly. "Unknown" is for when the evidence
+# really was inconclusive, not for when there was simply nothing wrong.
+if [[ "${DOMAIN}" == "?" && "${MCH_PHASE:-}" == "Running" ]]; then
+  VERDICT="No problems found - cluster is up and MultiClusterHub is Running"
+  DOMAIN="-"
+fi
+
 section "Verdict"
-echo "* Domain:  ${DOMAIN}  (A = no cluster, A' = cluster up but RHACM failed)"
+echo "* Domain:  ${DOMAIN}  (A = no cluster, A' = cluster up but RHACM failed, - = healthy)"
 echo "* Verdict: ${VERDICT}"
