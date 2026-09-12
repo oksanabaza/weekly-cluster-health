@@ -17,8 +17,8 @@
 # No `set -e` on purpose: a diagnostic must keep going when a probe fails.
 set -uo pipefail
 
-CLUSTERPOOL_TARGET_NAMESPACE=${CLUSTERPOOL_TARGET_NAMESPACE:?"Please specify CLUSTERPOOL_TARGET_NAMESPACE"}
-CLUSTERCLAIM_NAME=${CLUSTERCLAIM_NAME:?"Please specify CLUSTERCLAIM_NAME"}
+CLUSTERPOOL_TARGET_NAMESPACE=${CLUSTERPOOL_TARGET_NAMESPACE:-"console-squad"}
+CLUSTERCLAIM_NAME=${CLUSTERCLAIM_NAME:-"weekly"}
 CLUSTERPOOL_NAME=${CLUSTERPOOL_NAME:-""}
 CLAIMED_KUBECONFIG=${CLAIMED_KUBECONFIG:-""}
 INSTALL_LOG_LINES=${INSTALL_LOG_LINES:-40}
@@ -35,6 +35,21 @@ CD_BAD_WHEN_FALSE="Provisioned RequirementsMet"
 function section {
   echo ""
   echo "$(date) ##### $*"
+}
+
+# The weekly CronJob alternates pools by ISO week parity. Mirrored here so the
+# usual case needs no arguments - pass CLUSTERPOOL_NAME to inspect another pool.
+#
+# 10# forces base 10: date +%V zero-pads, and bash reads 08 and 09 as invalid
+# octal, which aborts the whole if-statement rather than falling through.
+function poolForCurrentWeek {
+  local week
+  week=$(date +%V)
+  if (( 10#${week} % 2 == 0 )); then
+    echo "cs-aws-50"
+  else
+    echo "cs-aws-422"
+  fi
 }
 
 # Find a kubeconfig for the claimed cluster. Three sources, in order:
@@ -136,6 +151,13 @@ fi
 ##############################################################################
 # ClusterPool - only interesting when nothing was claimable
 ##############################################################################
+# With no claim to read the pool from, fall back to the CronJob's week parity.
+if [[ -z "${CLUSTERPOOL_NAME}" && -z "${CLUSTERDEPLOYMENT:-}" ]]; then
+  CLUSTERPOOL_NAME=$(poolForCurrentWeek)
+  echo "* Pool unknown - assuming ${CLUSTERPOOL_NAME} for ISO week $(date +%V)"
+  echo "  Diagnosing an older run? Pass CLUSTERPOOL_NAME explicitly."
+fi
+
 if [[ -n "${CLUSTERPOOL_NAME}" && -z "${CLUSTERDEPLOYMENT:-}" ]]; then
   section "ClusterPool ${CLUSTERPOOL_NAME}"
   POOL_JSON=$(oc get -n "${CLUSTERPOOL_TARGET_NAMESPACE}" clusterpool.hive "${CLUSTERPOOL_NAME}" -o json 2>/dev/null)

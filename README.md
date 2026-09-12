@@ -28,9 +28,8 @@ Domain B is where an AI agent earns its keep (planned, see below).
 Read-only. Never creates, patches, or deletes anything.
 
 ```bash
-CLUSTERPOOL_TARGET_NAMESPACE=console-squad \
-CLUSTERCLAIM_NAME=<claim> \
-./diagnose.sh
+./diagnose.sh                          # defaults to the weekly claim
+CLUSTERCLAIM_NAME=weekly-managed ./diagnose.sh
 ```
 
 Run it while logged into the **ClusterPool host** (collective). It walks the
@@ -49,13 +48,18 @@ chain top-down and stops at the first conclusive answer:
 
 ### Environment
 
-| Variable | Required | Default |
-|----------|----------|---------|
-| `CLUSTERPOOL_TARGET_NAMESPACE` | yes | — |
-| `CLUSTERCLAIM_NAME` | yes | — |
-| `CLUSTERPOOL_NAME` | no | read from the claim |
-| `CLAIMED_KUBECONFIG` | no | Lifeguard's path, else `ck kubeconfig -r` |
-| `INSTALL_LOG_LINES` | no | `40` |
+| Variable | Default |
+|----------|---------|
+| `CLUSTERPOOL_TARGET_NAMESPACE` | `console-squad` |
+| `CLUSTERCLAIM_NAME` | `weekly` |
+| `CLUSTERPOOL_NAME` | read from the claim, else derived from the ISO week |
+| `CLAIMED_KUBECONFIG` | Lifeguard's path, else `ck kubeconfig -r` |
+| `INSTALL_LOG_LINES` | `40` |
+
+The weekly CronJob alternates pools by ISO week parity (even → `cs-aws-50`,
+odd → `cs-aws-422`); `diagnose.sh` mirrors that when it can't read the pool off
+a claim. Pass `CLUSTERPOOL_NAME` explicitly when diagnosing an older run, since
+the parity of *today* isn't the parity of the week that failed.
 
 Needs `oc` and `jq`. `ck` ([cluster-keeper](https://github.com/stolostron/cluster-keeper))
 is optional — it's only used to fetch a kubeconfig for the domain A′ checks.
