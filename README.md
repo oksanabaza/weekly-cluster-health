@@ -46,6 +46,29 @@ chain top-down and stops at the first conclusive answer:
    installer log, reached via `.status.provisionRef.name`.
 5. **Domain A′** — if a kubeconfig for the claimed cluster is available.
 
+### Output
+
+One table, printed once at the end — findings only mean anything next to each
+other, and a report that streams out over twenty seconds can't be read as a whole.
+Long Hive messages, resource listings and the installer log go under `DETAILS`
+and `INSTALLER LOG` below it, so the table stays one line per check.
+
+```
+  ACM WEEKLY CLUSTER   weekly   2026-09-14 09:49 EDT
+  api.collective.dev02.red-chesterfield.com:6443  |  ns console-squad  |  pool cs-aws-422
+
+  ────────────────────────  ──────  ──────────────────────────────────────
+  ClusterClaim              ok      created 2026-09-11T11:15:03Z
+  ClusterDeployment         FAIL    ProvisionFailed=AWSInsufficientCapacity
+  ClusterProvision          FAIL    stage=failed
+  ────────────────────────  ──────  ──────────────────────────────────────
+   DOMAIN A   Provisioning failed: AWSInsufficientCapacity
+```
+
+Progress goes to **stderr** and is erased when the report prints, so
+`./diagnose.sh > report.txt` captures the report and nothing else. Colour is
+used only when stdout is a terminal; `NO_COLOR=1` turns it off there too.
+
 ### Environment
 
 | Variable | Default |
