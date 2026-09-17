@@ -22,7 +22,7 @@ is what makes manual debugging slow:
 | **B** | Cluster and RHACM are up, but the hub is degraded | The claimed cluster, via the ACM hub health agent |
 
 A, A′ and Import are deterministic enough for plain `oc` + `jq` — that's `diagnose.sh`.
-Domain B is where an AI agent earns its keep (planned, see below).
+Domain B is where an AI agent earns its keep — see `hub-health.sh` below.
 
 Import is its own domain because a hub can be flawless while the second CronJob,
 `import-weekly-managed`, never landed its cluster — nothing in A or A′ would
@@ -63,7 +63,7 @@ and `INSTALLER LOG` below it, so the table stays one line per check.
 
 ```
   ACM WEEKLY CLUSTER   weekly   2026-09-14 09:49 EDT
-  api.collective.dev02.red-chesterfield.com:6443  |  ns console-squad  |  pool cs-aws-422
+  api.collective.aws.red-chesterfield.com:6443  |  ns console-squad  |  pool cs-aws-50
 
   ────────────────────────  ──────  ──────────────────────────────────────
   ClusterClaim              ok      created 2026-09-11T11:15:03Z
@@ -171,24 +171,36 @@ never have to delete a Job before creating one.
 The job template sets `backoffLimit: 0`, so a retry that fails stops instead of
 looping — read its logs and create another one.
 
-## Planned: domain B
+## hub-health.sh — domain B
 
 [`acm-hub-health`](https://github.com/stolostron/acm-ai-qe/tree/main/apps/acm-hub-health)
-is a Claude Code agent that diagnoses a running ACM hub. The intent is to run it
-against the weekly cluster after a successful deploy and post the report to Slack.
-
-It only makes sense on a deploy that already passed — a hub that never installed
-has nothing to inspect. Both halves of that handoff now exist, so the wrapper is
-a two-liner:
+is a Claude Code agent that diagnoses a running ACM hub. `hub-health.sh` points
+it at the weekly cluster:
 
 ```bash
-./diagnose.sh || exit                              # exit 0 means clean
-KUBECONFIG=$(./claimed-kubeconfig.sh) run-hub-health
+./diagnose.sh && ./hub-health.sh     # only run it on a clean deploy
+./hub-health.sh sanity               # 30s pulse instead of the standard check
 ```
 
-Open items before that can be automated:
+The `&&` is the point. A hub that never installed has nothing to inspect, so
+domain B is for *verifying a deploy that succeeded*, not for investigating one
+that failed — that's what exit code 0 from `diagnose.sh` means.
 
-- Runs as a separate image/CronJob — the deploy image stays lean.
-- Needs a GCP service account for Vertex; the interactive `setup.sh` steps
-  (on-cluster `acm-search` MCP deployment) must be pre-baked, not run at runtime.
-- Read-only to start. Gated auto-remediation only after it's been trusted for a while.
+Run it from the ClusterPool host like everything else here: the hub kubeconfig
+comes from `claimed-kubeconfig.sh`, so there is no second login.
+
+First time, clone [acm-ai-qe](https://github.com/stolostron/acm-ai-qe), run
+`claude` then `/onboard` in `apps/acm-hub-health` — it configures the MCP servers
+and credentials — and set `ACM_HUB` if your checkout isn't at
+`~/work/acm-ai-qe/apps/acm-hub-health/acm-hub`.
+
+`acm-hub` defaults to print mode, which presents a remediation plan but cannot
+execute it. Leave it that way until the agent has earned more trust; `-i` gives
+it a session that can apply fixes.
+
+### Still to automate
+
+- Running on a schedule needs a separate image/CronJob — the deploy image stays lean.
+- That image needs a GCP service account for Vertex, and the interactive
+  `/onboard` steps pre-baked rather than run at startup.
+- Posting the report to Slack.

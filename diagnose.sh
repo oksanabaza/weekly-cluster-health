@@ -173,7 +173,7 @@ if [[ -z "${CLAIM_JSON}" ]]; then
     addRow "ClusterClaim" "skip" "not the ClusterPool host - domain A not checked"
     addNote "${YELLOW}[?]${RESET} ${HUB#https://} has no ClusterClaims and no ClusterPools in ${CLUSTERPOOL_TARGET_NAMESPACE}."
     addNote "      Domain A lives on the ClusterPool host (collective). Log in there and re-run:"
-    addNote "      oc login --server=https://api.collective.dev02.red-chesterfield.com:6443"
+    addNote "      oc login --server=https://api.collective.aws.red-chesterfield.com:6443"
     VERDICT="Not logged into the ClusterPool host - domain A was not checked"
   else
     addRow "ClusterClaim" "FAIL" "no claim named ${CLUSTERCLAIM_NAME}"
