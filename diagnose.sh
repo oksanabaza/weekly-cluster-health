@@ -132,27 +132,18 @@ function noteConditions {
   done < <(badConditions "$2" "$3" "$4")
 }
 
-# Find a kubeconfig for the claimed cluster. Three sources, in order:
-#   1. CLAIMED_KUBECONFIG, if the caller set it
-#   2. the path Lifeguard writes, when running inside the deploy job
-#   3. cluster-keeper, which fetches a fresh copy from the ClusterDeployment
-# Echoes the path, or nothing if none is available.
+# Find a kubeconfig for the claimed cluster. The lookup lives in its own script
+# because the domain B hub-health agent needs exactly the same answer and must
+# not have to reimplement it. Echoes the path, or nothing.
 function resolveClaimedKubeconfig {
-  if [[ -n "${CLAIMED_KUBECONFIG}" && -f "${CLAIMED_KUBECONFIG}" ]]; then
-    echo "${CLAIMED_KUBECONFIG}"
-    return
-  fi
+  local helper
+  helper="$(dirname "${BASH_SOURCE[0]}")/claimed-kubeconfig.sh"
+  [[ -x "${helper}" ]] || return 0
 
-  local lifeguardPath="${LIFEGUARD_PATH:-/lifeguard}/clusterclaims/${CLUSTERCLAIM_NAME}/kubeconfig"
-  if [[ -f "${lifeguardPath}" ]]; then
-    echo "${lifeguardPath}"
-    return
-  fi
-
-  if command -v ck &>/dev/null; then
-    # -r forces a fresh fetch; a stale kubeconfig would misreport the cluster
-    ck kubeconfig -r "${CLUSTERCLAIM_NAME}" 2>/dev/null | tail -1
-  fi
+  CLUSTERPOOL_TARGET_NAMESPACE="${CLUSTERPOOL_TARGET_NAMESPACE}" \
+  CLUSTERCLAIM_NAME="${CLUSTERCLAIM_NAME}" \
+  CLAIMED_KUBECONFIG="${CLAIMED_KUBECONFIG}" \
+    "${helper}" 2>/dev/null
 }
 
 ##############################################################################
@@ -367,10 +358,13 @@ RESOLVED_KUBECONFIG=$(resolveClaimedKubeconfig)
 
 if [[ -z "${RESOLVED_KUBECONFIG}" || ! -f "${RESOLVED_KUBECONFIG}" ]]; then
   addRow "Claimed cluster" "skip" "no kubeconfig - domain A' not checked"
-  if command -v ck &>/dev/null; then
-    addNote "${DIM}[i]${RESET} 'ck kubeconfig -r ${CLUSTERCLAIM_NAME}' returned nothing - is that claim name right?"
+  if [[ -z "${CLUSTERDEPLOYMENT:-}" ]]; then
+    # No cluster was ever assigned, so there is no kubeconfig to find. That is
+    # domain A, already reported above, not a tooling problem.
+    addNote "${DIM}[i]${RESET} No cluster was assigned to ${CLUSTERCLAIM_NAME}, so there is nothing to connect to."
   else
-    addNote "${DIM}[i]${RESET} Set CLAIMED_KUBECONFIG, or install cluster-keeper so 'ck kubeconfig' can fetch one."
+    addNote "${DIM}[i]${RESET} './claimed-kubeconfig.sh' found nothing. Are you logged into the ClusterPool host?"
+    addNote "      Run it directly to see which source failed, or set CLAIMED_KUBECONFIG."
   fi
 else
   export KUBECONFIG="${RESOLVED_KUBECONFIG}"

@@ -102,7 +102,7 @@ The verdict, for callers that shouldn't have to grep the table:
 | `CLUSTERCLAIM_NAME` | `weekly` |
 | `MANAGED_CLUSTER_NAME` | `weekly-managed` |
 | `CLUSTERPOOL_NAME` | read from the claim, else `cs-aws-50` |
-| `CLAIMED_KUBECONFIG` | Lifeguard's path, else `ck kubeconfig -r` |
+| `CLAIMED_KUBECONFIG` | resolved by `claimed-kubeconfig.sh` |
 | `INSTALL_LOG_LINES` | `40` |
 
 The weekly CronJob now claims from `cs-aws-50` only; `diagnose.sh` assumes that
@@ -111,7 +111,31 @@ pool when it can't read one off a claim. It used to alternate by ISO week parity
 when diagnosing a run from back then.
 
 Needs `oc` and `jq`. `ck` ([cluster-keeper](https://github.com/stolostron/cluster-keeper))
-is optional — it's only used to fetch a kubeconfig for the domain A′ checks.
+is a last-resort fallback only, see below.
+
+## claimed-kubeconfig.sh
+
+Prints the path to a kubeconfig for whatever cluster the claim currently holds.
+Read-only, run from the ClusterPool host:
+
+```bash
+KUBECONFIG=$(./claimed-kubeconfig.sh) oc get nodes
+```
+
+This exists because the two halves of the job want opposite logins: `diagnose.sh`
+has to be on the pool host to see Hive at all, while anything that inspects the
+hub — the domain A′ checks, and the domain B agent later — has to be on the
+claimed cluster. Nobody should have to copy an `oc login` line out of the web
+console to cross that gap.
+
+Sources, in order: `CLAIMED_KUBECONFIG` → Lifeguard's path inside the deploy job
+→ **the admin kubeconfig Secret Hive keeps on the ClusterDeployment** → `ck`.
+The third is the one that matters: Hive wrote that Secret on the pool host when
+it provisioned the cluster, so no extra tooling and no browser are involved.
+
+The fetched kubeconfig lands in `$TMPDIR` with a `077` umask, and is overwritten
+on every run rather than reused — the claim name is recycled weekly, so a
+leftover file would point at a real cluster that is simply the wrong one.
 
 ### Notes on the implementation
 
@@ -148,6 +172,15 @@ looping — read its logs and create another one.
 [`acm-hub-health`](https://github.com/stolostron/acm-ai-qe/tree/main/apps/acm-hub-health)
 is a Claude Code agent that diagnoses a running ACM hub. The intent is to run it
 against the weekly cluster after a successful deploy and post the report to Slack.
+
+It only makes sense on a deploy that already passed — a hub that never installed
+has nothing to inspect. Both halves of that handoff now exist, so the wrapper is
+a two-liner:
+
+```bash
+./diagnose.sh || exit                              # exit 0 means clean
+KUBECONFIG=$(./claimed-kubeconfig.sh) run-hub-health
+```
 
 Open items before that can be automated:
 
