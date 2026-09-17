@@ -101,6 +101,22 @@ A few things are deliberate, and worth knowing before changing them:
   troubleshooting docs say `hive`, but that's an init container that only copies
   binaries.
 
+## Re-running a job by hand
+
+Once `diagnose.sh` has named the cause, the fix is often just to run the job
+again. Instantiate it from the CronJob rather than applying a saved manifest —
+Kubernetes fills in a fresh `ownerReference` and picks up the CronJob's current
+spec, so there is no second copy to keep in sync:
+
+```bash
+oc create job -n console-squad \
+  --from=cronjob/import-weekly-managed \
+  retry-import-$(date +%m%d)
+```
+
+The job template sets `backoffLimit: 0`, so a retry that fails stops instead of
+looping — read its logs and create another one.
+
 ## Planned: domain B
 
 [`acm-hub-health`](https://github.com/stolostron/acm-ai-qe/tree/main/apps/acm-hub-health)
