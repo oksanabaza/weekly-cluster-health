@@ -11,17 +11,22 @@ job fails, someone has to go digging by hand. That's what this repo is for.
 
 ## Failure domains
 
-Deploy failures split into two very different investigations, and conflating them
+Deploy failures split into very different investigations, and conflating them
 is what makes manual debugging slow:
 
 | Domain | What happened | Where to look |
 |--------|---------------|---------------|
 | **A** | No cluster came up — the claim never got a running cluster | ClusterPool host (collective): ClusterClaim, ClusterPool, ClusterDeployment, ClusterProvision |
 | **A′** | Cluster came up, but RHACM failed to install on it | The claimed cluster: CatalogSource, image pulls, CSVs, MultiClusterHub |
+| **Import** | Hub is up, but the managed cluster never joined it | The hub: ManagedCluster `weekly-managed` |
 | **B** | Cluster and RHACM are up, but the hub is degraded | The claimed cluster, via the ACM hub health agent |
 
-Domains A and A′ are deterministic enough for plain `oc` + `jq` — that's `diagnose.sh`.
+A, A′ and Import are deterministic enough for plain `oc` + `jq` — that's `diagnose.sh`.
 Domain B is where an AI agent earns its keep (planned, see below).
+
+Import is its own domain because a hub can be flawless while the second CronJob,
+`import-weekly-managed`, never landed its cluster — nothing in A or A′ would
+notice. Its fix is also different: re-run that job, see `retry-import.sh`.
 
 ## diagnose.sh
 
@@ -45,6 +50,9 @@ chain top-down and stops at the first conclusive answer:
 4. **ClusterProvision** — the classified failure reason and the tail of the
    installer log, reached via `.status.provisionRef.name`.
 5. **Domain A′** — if a kubeconfig for the claimed cluster is available.
+6. **Import** — on the hub, whether `weekly-managed` registered and its
+   `HubAccepted` / `Joined` / `Available` conditions are all `True`. `Unknown`
+   counts as bad: an `Available` that never reports is a half-finished import.
 
 ### Output
 
@@ -84,6 +92,7 @@ The verdict, for callers that shouldn't have to grep the table:
 | `1` | Domain A — no cluster came up |
 | `2` | Domain A′ — cluster came up, RHACM did not install |
 | `3` | Inconclusive, or domain A wasn't checked |
+| `4` | Import — hub is up, managed cluster never joined it |
 
 ### Environment
 
@@ -91,6 +100,7 @@ The verdict, for callers that shouldn't have to grep the table:
 |----------|---------|
 | `CLUSTERPOOL_TARGET_NAMESPACE` | `console-squad` |
 | `CLUSTERCLAIM_NAME` | `weekly` |
+| `MANAGED_CLUSTER_NAME` | `weekly-managed` |
 | `CLUSTERPOOL_NAME` | read from the claim, else `cs-aws-50` |
 | `CLAIMED_KUBECONFIG` | Lifeguard's path, else `ck kubeconfig -r` |
 | `INSTALL_LOG_LINES` | `40` |

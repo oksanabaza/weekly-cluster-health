@@ -4,9 +4,10 @@
 #
 # Read-only: this script never creates, patches, or deletes anything.
 #
-# It covers two failure domains:
-#   A  - No cluster came up (ClusterClaim never got a running cluster)
-#   A' - Cluster came up but RHACM failed to deploy on it
+# It covers three failure domains:
+#   A      - No cluster came up (ClusterClaim never got a running cluster)
+#   A'     - Cluster came up but RHACM failed to deploy on it
+#   IMPORT - Hub is fine, but the managed cluster never joined it
 #
 # Run against the ClusterPool cluster (collective). If a kubeconfig for the
 # claimed cluster is available, domain A' checks run too.
@@ -15,13 +16,15 @@
 # end. Progress goes to stderr, so stdout is only ever the report.
 #
 # Required : CLUSTERPOOL_TARGET_NAMESPACE, CLUSTERCLAIM_NAME
-# Optional : CLUSTERPOOL_NAME, CLAIMED_KUBECONFIG, INSTALL_LOG_LINES
+# Optional : CLUSTERPOOL_NAME, MANAGED_CLUSTER_NAME, CLAIMED_KUBECONFIG,
+#            INSTALL_LOG_LINES
 
 # No `set -e` on purpose: a diagnostic must keep going when a probe fails.
 set -uo pipefail
 
 CLUSTERPOOL_TARGET_NAMESPACE=${CLUSTERPOOL_TARGET_NAMESPACE:-"console-squad"}
 CLUSTERCLAIM_NAME=${CLUSTERCLAIM_NAME:-"weekly"}
+MANAGED_CLUSTER_NAME=${MANAGED_CLUSTER_NAME:-"weekly-managed"}
 CLUSTERPOOL_NAME=${CLUSTERPOOL_NAME:-""}
 CLAIMED_KUBECONFIG=${CLAIMED_KUBECONFIG:-""}
 INSTALL_LOG_LINES=${INSTALL_LOG_LINES:-40}
@@ -448,6 +451,48 @@ else
       VERDICT="MultiClusterHub is ${MCH_PHASE:-unknown}, not Running"
       DOMAIN="A'"
     fi
+
+    ##########################################################################
+    # Import - the managed cluster is claimed and imported by a second CronJob
+    ##########################################################################
+    # A hub can be perfectly healthy while the import never landed, so this is
+    # its own domain rather than a footnote to A'. Only meaningful when we are
+    # actually on the hub: ManagedClusters are registered there, not on the
+    # cluster being imported, so an empty result elsewhere would mean nothing.
+    if [[ -n "${MCH_INFO}" ]]; then
+      progress "reading ManagedCluster ${MANAGED_CLUSTER_NAME}"
+      MC_JSON=$(oc get managedcluster "${MANAGED_CLUSTER_NAME}" -o json 2>/dev/null)
+      if [[ -z "${MC_JSON}" ]]; then
+        addRow "ManagedCluster" "FAIL" "${MANAGED_CLUSTER_NAME} not imported"
+        MC_LIST=$(oc get managedcluster -o json 2>/dev/null \
+          | jq -r '.items[]? | "      \(.metadata.name)  available=\([.status.conditions[]? | select(.type == "ManagedClusterConditionAvailable") | .status] | first // "?")"')
+        addNote "${RED}[!]${RESET} No ManagedCluster ${MANAGED_CLUSTER_NAME} on the hub. Registered clusters:"
+        addNote "${MC_LIST:-"      (none)"}"
+        addNote "      Re-run the import from the ClusterPool host: ./retry-import.sh"
+        VERDICT="${MANAGED_CLUSTER_NAME} never joined the hub - re-run the import job"
+        DOMAIN="IMPORT"
+      else
+        # Positive polarity, and Unknown is as bad as False here: an Available
+        # that never reports is exactly what a half-finished import looks like.
+        MC_BAD=$(echo "${MC_JSON}" | jq -r '
+          (.status.conditions // []) as $conds
+          | ["HubAcceptedManagedCluster", "ManagedClusterJoined", "ManagedClusterConditionAvailable"]
+          | map(. as $t
+                | ($conds | map(select(.type == $t)) | first) as $c
+                | select(($c.status // "missing") != "True")
+                | "\($t)=\($c.status // "missing")")
+          | join(", ")')
+        if [[ -n "${MC_BAD}" ]]; then
+          addRow "ManagedCluster" "FAIL" "$(short "${MC_BAD}")"
+          addNote "${RED}[!]${RESET} ${MANAGED_CLUSTER_NAME} is registered but not usable: ${BOLD}${MC_BAD}${RESET}"
+          addNote "      Klusterlet pods on the managed cluster are the next place to look."
+          VERDICT="${MANAGED_CLUSTER_NAME} is imported but not available: ${MC_BAD}"
+          DOMAIN="IMPORT"
+        else
+          addRow "ManagedCluster" "ok" "${MANAGED_CLUSTER_NAME} joined and available"
+        fi
+      fi
+    fi
   fi
   unset KUBECONFIG
 fi
@@ -469,10 +514,11 @@ if [[ "${DOMAIN}" == "?" && "${MCH_PHASE:-}" == "Running" ]]; then
 fi
 
 case "${DOMAIN}" in
-  "-") BADGE="${BADGE_OK} HEALTHY ${RESET}" ;;
-  "A") BADGE="${BADGE_BAD} DOMAIN A ${RESET}" ;;
-  "A'") BADGE="${BADGE_BAD} DOMAIN A' ${RESET}" ;;
-  *)   BADGE="${BADGE_MEH} UNKNOWN ${RESET}" ;;
+  "-")      BADGE="${BADGE_OK} HEALTHY ${RESET}" ;;
+  "A")      BADGE="${BADGE_BAD} DOMAIN A ${RESET}" ;;
+  "A'")     BADGE="${BADGE_BAD} DOMAIN A' ${RESET}" ;;
+  "IMPORT") BADGE="${BADGE_BAD} IMPORT ${RESET}" ;;
+  *)        BADGE="${BADGE_MEH} UNKNOWN ${RESET}" ;;
 esac
 
 RULE="  ────────────────────────  ──────  ──────────────────────────────────────"
@@ -512,8 +558,9 @@ echo ""
 # table - wording changes, these do not. Only 0 means the deploy is worth
 # handing on to a domain B hub-health check; 3 means we could not tell.
 case "${DOMAIN}" in
-  "-")  exit 0 ;;
-  "A")  exit 1 ;;
-  "A'") exit 2 ;;
-  *)    exit 3 ;;
+  "-")      exit 0 ;;
+  "A")      exit 1 ;;
+  "A'")     exit 2 ;;
+  "IMPORT") exit 4 ;;
+  *)        exit 3 ;;
 esac
