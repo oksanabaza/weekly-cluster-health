@@ -161,8 +161,12 @@ spec, so there is no second copy to keep in sync:
 ```bash
 oc create job -n console-squad \
   --from=cronjob/import-weekly-managed \
-  retry-import-$(date +%m%d)
+  retry-import-$(date +%m%d-%H%M)
 ```
+
+`retry-import.sh` is that one command with the timestamp filled in — the minutes
+matter, so a second attempt an hour later doesn't collide with the first and you
+never have to delete a Job before creating one.
 
 The job template sets `backoffLimit: 0`, so a retry that fails stops instead of
 looping — read its logs and create another one.
