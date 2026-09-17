@@ -74,6 +74,17 @@ pool and deployment rows read `skip` rather than `FAIL` — a cluster that was
 never meant to hold those resources isn't evidence of a failed deploy. Domain A′
 is independent and still runs, since it uses its own kubeconfig.
 
+### Exit codes
+
+The verdict, for callers that shouldn't have to grep the table:
+
+| Code | Meaning |
+|------|---------|
+| `0` | Healthy — deploy is clean, safe to go on to a hub-health check |
+| `1` | Domain A — no cluster came up |
+| `2` | Domain A′ — cluster came up, RHACM did not install |
+| `3` | Inconclusive, or domain A wasn't checked |
+
 ### Environment
 
 | Variable | Default |

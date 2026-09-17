@@ -507,3 +507,13 @@ if [[ -n "${LOGBLOCK}" ]]; then
 fi
 
 echo ""
+
+# The verdict as an exit code, so a caller can act on it without grepping the
+# table - wording changes, these do not. Only 0 means the deploy is worth
+# handing on to a domain B hub-health check; 3 means we could not tell.
+case "${DOMAIN}" in
+  "-")  exit 0 ;;
+  "A")  exit 1 ;;
+  "A'") exit 2 ;;
+  *)    exit 3 ;;
+esac
