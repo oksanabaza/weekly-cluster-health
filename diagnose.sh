@@ -26,9 +26,19 @@ CLUSTERPOOL_NAME=${CLUSTERPOOL_NAME:-""}
 CLAIMED_KUBECONFIG=${CLAIMED_KUBECONFIG:-""}
 INSTALL_LOG_LINES=${INSTALL_LOG_LINES:-40}
 
+# Pool to assume when there is no claim to read one off. The weekly CronJob used
+# to alternate between cs-aws-50 and cs-aws-422 by ISO week parity; it now only
+# claims from cs-aws-50. Diagnosing a run from back then? Pass CLUSTERPOOL_NAME,
+# because the parity of today is not the parity of the week that failed.
+DEFAULT_CLUSTERPOOL_NAME="cs-aws-50"
+
 # Headline verdict, refined as evidence is gathered
 VERDICT="No conclusive evidence found"
 DOMAIN="?"
+
+# Set when the cluster we are logged into turns out not to be the ClusterPool
+# host, which makes every domain A finding meaningless rather than bad.
+NOT_POOL_HOST=0
 
 # Condition polarity per Hive's apis/hive/v1. Most ClusterDeployment conditions
 # are negative polarity (True means something is wrong); these two are not.
@@ -119,21 +129,6 @@ function noteConditions {
   done < <(badConditions "$2" "$3" "$4")
 }
 
-# The weekly CronJob alternates pools by ISO week parity. Mirrored here so the
-# usual case needs no arguments - pass CLUSTERPOOL_NAME to inspect another pool.
-#
-# 10# forces base 10: date +%V zero-pads, and bash reads 08 and 09 as invalid
-# octal, which aborts the whole if-statement rather than falling through.
-function poolForCurrentWeek {
-  local week
-  week=$(date +%V)
-  if (( 10#${week} % 2 == 0 )); then
-    echo "cs-aws-50"
-  else
-    echo "cs-aws-422"
-  fi
-}
-
 # Find a kubeconfig for the claimed cluster. Three sources, in order:
 #   1. CLAIMED_KUBECONFIG, if the caller set it
 #   2. the path Lifeguard writes, when running inside the deploy job
@@ -176,6 +171,16 @@ if [[ -z "${CLAIM_JSON}" ]]; then
     addNote "${YELLOW}[?]${RESET} Claims against pool ${CLUSTERPOOL_NAME}, re-run with one of these as CLUSTERCLAIM_NAME:"
     addNote "${CLAIMS_ON_POOL:-"      (none)"}"
     VERDICT="${CLUSTERCLAIM_NAME} is a pool name - re-run with an actual claim name"
+  elif [[ "$(oc get -n "${CLUSTERPOOL_TARGET_NAMESPACE}" clusterpool.hive -o name 2>/dev/null | wc -l | tr -d ' ')" == "0" ]]; then
+    # No claims and no pools at all: this is almost certainly not the ClusterPool
+    # host. Reporting domain A as failed here would be reporting on a cluster that
+    # was never supposed to hold these resources - so check nothing and say why.
+    NOT_POOL_HOST=1
+    addRow "ClusterClaim" "skip" "not the ClusterPool host - domain A not checked"
+    addNote "${YELLOW}[?]${RESET} ${HUB#https://} has no ClusterClaims and no ClusterPools in ${CLUSTERPOOL_TARGET_NAMESPACE}."
+    addNote "      Domain A lives on the ClusterPool host (collective). Log in there and re-run:"
+    addNote "      oc login --server=https://api.collective.dev02.red-chesterfield.com:6443"
+    VERDICT="Not logged into the ClusterPool host - domain A was not checked"
   else
     addRow "ClusterClaim" "FAIL" "no claim named ${CLUSTERCLAIM_NAME}"
     EXISTING_CLAIMS=$(oc get -n "${CLUSTERPOOL_TARGET_NAMESPACE}" clusterclaim.hive -o json 2>/dev/null \
@@ -226,13 +231,13 @@ fi
 ##############################################################################
 # ClusterPool - only interesting when nothing was claimable
 ##############################################################################
-# With no claim to read the pool from, fall back to the CronJob's week parity.
-if [[ -z "${CLUSTERPOOL_NAME}" && -z "${CLUSTERDEPLOYMENT:-}" ]]; then
-  CLUSTERPOOL_NAME=$(poolForCurrentWeek)
-  addNote "${DIM}[i]${RESET} Pool unknown - assuming ${CLUSTERPOOL_NAME} for ISO week $(date +%V). Diagnosing an older run? Pass CLUSTERPOOL_NAME."
+# With no claim to read the pool from, fall back to the pool the CronJob uses.
+if (( ! NOT_POOL_HOST )) && [[ -z "${CLUSTERPOOL_NAME}" && -z "${CLUSTERDEPLOYMENT:-}" ]]; then
+  CLUSTERPOOL_NAME="${DEFAULT_CLUSTERPOOL_NAME}"
+  addNote "${DIM}[i]${RESET} Pool unknown - assuming ${CLUSTERPOOL_NAME}. Diagnosing a run from when pools alternated by week? Pass CLUSTERPOOL_NAME."
 fi
 
-if [[ -n "${CLUSTERPOOL_NAME}" && -z "${CLUSTERDEPLOYMENT:-}" ]]; then
+if (( ! NOT_POOL_HOST )) && [[ -n "${CLUSTERPOOL_NAME}" && -z "${CLUSTERDEPLOYMENT:-}" ]]; then
   progress "reading ClusterPool ${CLUSTERPOOL_NAME}"
   POOL_JSON=$(oc get -n "${CLUSTERPOOL_TARGET_NAMESPACE}" clusterpool.hive "${CLUSTERPOOL_NAME}" -o json 2>/dev/null)
   if [[ -z "${POOL_JSON}" ]]; then
@@ -453,8 +458,14 @@ fi
 # A healthy deploy should say so plainly. "Unknown" is for when the evidence
 # really was inconclusive, not for when there was simply nothing wrong.
 if [[ "${DOMAIN}" == "?" && "${MCH_PHASE:-}" == "Running" ]]; then
-  VERDICT="Cluster is up and MultiClusterHub is Running"
-  DOMAIN="-"
+  if (( NOT_POOL_HOST )); then
+    # The hub is demonstrably fine, but nothing was checked on the pool side, so
+    # this is not the same statement as a clean bill of health.
+    VERDICT="MultiClusterHub is Running, but domain A was not checked - log into collective"
+  else
+    VERDICT="Cluster is up and MultiClusterHub is Running"
+    DOMAIN="-"
+  fi
 fi
 
 case "${DOMAIN}" in

@@ -69,20 +69,25 @@ Progress goes to **stderr** and is erased when the report prints, so
 `./diagnose.sh > report.txt` captures the report and nothing else. Colour is
 used only when stdout is a terminal; `NO_COLOR=1` turns it off there too.
 
+Domain A needs the ClusterPool host. Run against anything else and the claim,
+pool and deployment rows read `skip` rather than `FAIL` — a cluster that was
+never meant to hold those resources isn't evidence of a failed deploy. Domain A′
+is independent and still runs, since it uses its own kubeconfig.
+
 ### Environment
 
 | Variable | Default |
 |----------|---------|
 | `CLUSTERPOOL_TARGET_NAMESPACE` | `console-squad` |
 | `CLUSTERCLAIM_NAME` | `weekly` |
-| `CLUSTERPOOL_NAME` | read from the claim, else derived from the ISO week |
+| `CLUSTERPOOL_NAME` | read from the claim, else `cs-aws-50` |
 | `CLAIMED_KUBECONFIG` | Lifeguard's path, else `ck kubeconfig -r` |
 | `INSTALL_LOG_LINES` | `40` |
 
-The weekly CronJob alternates pools by ISO week parity (even → `cs-aws-50`,
-odd → `cs-aws-422`); `diagnose.sh` mirrors that when it can't read the pool off
-a claim. Pass `CLUSTERPOOL_NAME` explicitly when diagnosing an older run, since
-the parity of *today* isn't the parity of the week that failed.
+The weekly CronJob now claims from `cs-aws-50` only; `diagnose.sh` assumes that
+pool when it can't read one off a claim. It used to alternate by ISO week parity
+(even → `cs-aws-50`, odd → `cs-aws-422`), so pass `CLUSTERPOOL_NAME` explicitly
+when diagnosing a run from back then.
 
 Needs `oc` and `jq`. `ck` ([cluster-keeper](https://github.com/stolostron/cluster-keeper))
 is optional — it's only used to fetch a kubeconfig for the domain A′ checks.
